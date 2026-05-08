@@ -1,0 +1,118 @@
+diff --git a/src/main/scala/subsystem/BankedCoherenceParams.scala b/src/main/scala/subsystem/BankedCoherenceParams.scala
+index 235cd1eeb..1b1f58206 100644
+--- a/src/main/scala/subsystem/BankedCoherenceParams.scala
++++ b/src/main/scala/subsystem/BankedCoherenceParams.scala
+@@ -2,6 +2,7 @@
+ 
+ package freechips.rocketchip.subsystem
+ 
++import chisel3._
+ import chisel3.util._
+ 
+ import org.chipsalliance.cde.config._
+@@ -18,6 +19,7 @@ import freechips.rocketchip.tilelink.{
+ import freechips.rocketchip.util.Location
+ 
+ import CoherenceManagerWrapper._
++import freechips.rocketchip.diplomacy.BufferParams
+ 
+ /** Global cache coherence granularity, which applies to all caches, for now. */
+ case object CacheBlockBytes extends Field[Int](64)
+@@ -69,10 +71,13 @@ class CoherenceManagerWrapper(params: CoherenceManagerWrapperParams, context: Ha
+   val inwardNode = tempIn :*= coherent_jbar.node
+   val builtInDevices = BuiltInDevices.none
+   val prefixNode = None
++  println ("params.nBanks", params.nBanks)
++  println ("params.blockBytes", params.blockBytes)
+ 
+   private def banked(node: TLOutwardNode): TLOutwardNode =
+     if (params.nBanks == 0) node else { TLTempNode() :=* BankBinder(params.nBanks, params.blockBytes) :*= node }
+-  val outwardNode = banked(tempOut)
++
++  val outwardNode = TLBuffer(BufferParams.none, DelayerParams(100, 8)) :=* banked(tempOut)
+ }
+ 
+ object CoherenceManagerWrapper {
+@@ -108,3 +113,81 @@ object CoherenceManagerWrapper {
+     (node, node, None)
+   }
+ }
++
++class TokenDelayer[T <: Data](gen: T, delay: Int, entries: Int) extends Module {
++  val io = IO(new Bundle {
++    val enq = Flipped(Decoupled(gen))
++    val deq = Decoupled(gen)
++  })
++  require(delay > 1, "Use a normal Queue if you want a delay of 1")
++
++  class DebugData extends Bundle {
++    val data = gen.cloneType
++    val debug_id = UInt(log2Ceil(delay + 1).W)
++  }
++  val debug_id = RegInit(0.U(log2Ceil(delay + 1).W))
++  val cycle = freechips.rocketchip.util.WideCounter(32).value
++
++  val aging = RegInit(0.U((delay - 1).W))
++  val tokens = RegInit(0.U(log2Ceil(entries + 1).W))
++  val queue = Module(new Queue(new DebugData, entries))
++  aging := aging << 1
++  when (aging(delay - 2) === 1.U) {
++    assert (tokens < entries.U, "Tokens overflow")
++    tokens := tokens + 1.U
++  }
++
++  // enqueue logic
++  io.enq.ready := queue.io.enq.ready
++  queue.io.enq.valid := io.enq.valid
++  queue.io.enq.bits.data := io.enq.bits
++  queue.io.enq.bits.debug_id := debug_id
++  when (io.enq.fire) {
++    aging := (aging << 1).asUInt | 1.U
++    when (debug_id =/= delay.U) {
++      debug_id := debug_id + 1.U
++    } .otherwise {
++      debug_id := 0.U
++    }
++  }
++
++  // dequeue logic
++  io.deq.valid := false.B
++  io.deq.bits := queue.io.deq.bits.data
++  queue.io.deq.ready := false.B
++  when (tokens > 0.U) {
++    io.deq.valid := queue.io.deq.valid
++    queue.io.deq.ready := io.deq.ready
++    when (io.deq.fire) {
++      when (aging(delay - 2) === 0.U) {
++        tokens := tokens - 1.U
++      } .otherwise {
++        tokens := tokens
++      }
++    }
++  }
++
++  assert (!(queue.io.deq.valid && tokens === 0.U && aging === 0.U), "Tokens leaked")
++}
++
++class DelayerParams(delay: Int, entries: Int) extends BufferParams(delay, false, false) {
++  require (delay >= 0, "Delay must be >= 0")
++  override def apply[T <: Data](x: DecoupledIO[T]): DecoupledIO[T] = {
++    if (delay > 1) {
++      val delayer = Module(new TokenDelayer(chiselTypeOf(x.bits), delay, entries))
++      println("TokenDelayer", delay, entries)
++      delayer.io.enq <> x
++      delayer.io.deq
++    } else if (delay > 0) {
++      Queue(x)
++    } else {
++      x
++    }
++  }
++}
++
++object DelayerParams
++{
++  def apply(delay: Int): DelayerParams = apply(delay, delay)
++  def apply(delay: Int, entries: Int): DelayerParams = new DelayerParams(delay, entries)
++}
+\ No newline at end of file

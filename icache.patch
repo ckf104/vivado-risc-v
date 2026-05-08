@@ -1,0 +1,13 @@
+diff --git a/src/main/scala/rocket/ICache.scala b/src/main/scala/rocket/ICache.scala
+index d3bf3c211..b88df86d1 100644
+--- a/src/main/scala/rocket/ICache.scala
++++ b/src/main/scala/rocket/ICache.scala
+@@ -56,6 +56,8 @@ case class ICacheParams(
+     dataECC: Option[String] = None,
+     itimAddr: Option[BigInt] = None,
+     prefetch: Boolean = false,
++    fetchMSHRNum: Int = 2,
++    pfMSHRNum: Int = 4,
+     blockBytes: Int = 64,
+     latency: Int = 2,
+     fetchBytes: Int = 4) extends L1CacheParams {
