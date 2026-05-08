@@ -245,6 +245,8 @@ workspace/$(CONFIG)/system.dts: $(CHISEL_SRC) rocket-chip/bootrom/bootrom.img wo
 
 # Generate board specific device tree, boot ROM and FIRRTL
 workspace/$(CONFIG)/system-$(BOARD)/RocketSystem.fir: workspace/$(CONFIG)/system.dts $(wildcard bootrom/*) workspace/gcc/riscv
+# 不清空编译目录的话 firtool 会报错 file allready exists
+	rm -r workspace/$(CONFIG)/system-$(BOARD) 2>/dev/null || true
 	mkdir -p workspace/$(CONFIG)/system-$(BOARD)
 	cat workspace/$(CONFIG)/system.dts board/$(BOARD)/bootrom.dts >bootrom/system.dts
 	sed -i "s#reg = <0x80000000 *0x.*>#reg = <$(MEMORY_ADDR_RANGE32)>#g" bootrom/system.dts
@@ -268,6 +270,9 @@ workspace/$(CONFIG)/system-$(BOARD).v: workspace/$(CONFIG)/system-$(BOARD)/Rocke
 		--verilog --lowering-options=verifLabels,disallowLocalVariables,disallowPackedArrays,noAlwaysComb \
 		--disable-annotation-unknown $<
 	cp workspace/$(CONFIG)/system-$(BOARD)/RocketSystem.v workspace/$(CONFIG)/system-$(BOARD).v
+
+workspace/$(CONFIG)/system-$(BOARD).sv: workspace/$(CONFIG)/system-$(BOARD).v
+	cp workspace/$(CONFIG)/system-$(BOARD).v workspace/$(CONFIG)/system-$(BOARD).sv
 
 # Generate Rocket SoC wrapper for Vivado
 workspace/$(CONFIG)/rocket.vhdl: workspace/$(CONFIG)/system-$(BOARD).v
@@ -307,8 +312,7 @@ cfgmem_file = workspace/$(CONFIG)/$(proj_name).$(CFG_FORMAT)
 prm_file    = workspace/$(CONFIG)/$(proj_name).prm
 vivado      = env XILINX_LOCAL_USER_DATA=no vivado -mode batch -nojournal -nolog -notrace -quiet
 
-workspace/$(CONFIG)/system-$(BOARD).tcl: workspace/$(CONFIG)/rocket.vhdl workspace/$(CONFIG)/system-$(BOARD).v
-	cp workspace/$(CONFIG)/system-$(BOARD).v workspace/$(CONFIG)/system-$(BOARD).sv
+workspace/$(CONFIG)/system-$(BOARD).tcl: workspace/$(CONFIG)/rocket.vhdl workspace/$(CONFIG)/system-$(BOARD).sv
 	echo "set vivado_board_name $(BOARD)" >$@
 	if [ "$(BOARD_PART)" != "" -a "$(BOARD_PART)" != "NONE" ] ; then echo "set vivado_board_part $(BOARD_PART)" >>$@ ; fi
 	if [ "$(BOARD_CONFIG)" != "" ] ; then echo "set board_config $(BOARD_CONFIG)" >>$@ ; fi
@@ -342,6 +346,8 @@ $(synthesis): $(proj_time)
 	$(vivado) -source $(proj_path)/make-synthesis.tcl
 	if find $(proj_path) -name "*.log" -exec cat {} \; | grep 'ERROR: ' ; then exit 1 ; fi
 
+BOOM_COMMIT=$(shell git -C "generators/riscv-boom" rev-parse HEAD)
+
 $(bitstream): $(synthesis)
 	echo "set_param general.maxThreads $(MAX_THREADS)" >>$(proj_path)/make-bitstream.tcl
 	echo "open_project $(proj_file)" >$(proj_path)/make-bitstream.tcl
@@ -350,6 +356,7 @@ $(bitstream): $(synthesis)
 	echo "wait_on_run impl_1" >>$(proj_path)/make-bitstream.tcl
 	$(vivado) -source $(proj_path)/make-bitstream.tcl
 	if find $(proj_path) -name "*.log" -exec cat {} \; | grep 'ERROR: ' ; then exit 1 ; fi
+	echo "$(BOOM_COMMIT)" > workspace/$(CONFIG)/boom_commit.txt
 
 ifeq ($(CFG_BOOT),)
   CFG_FILES=$(bitstream)
@@ -363,6 +370,28 @@ $(cfgmem_file) $(prm_file): $(CFG_FILES)
 	$(vivado) -source $(proj_path)/make-mcs.tcl
 
 bitstream: $(bitstream) $(cfgmem_file)
+
+
+
+regen_bitstream: workspace/$(CONFIG)/regen
+
+workspace/$(CONFIG)/regen: workspace/$(CONFIG)/system-$(BOARD).sv workspace/$(CONFIG)/rocket.vhdl
+	echo "set_param general.maxThreads $(MAX_THREADS)" >>$(proj_path)/make-synthesis.tcl
+	echo "open_project $(proj_file)" >$(proj_path)/make-synthesis.tcl
+	echo "update_compile_order -fileset sources_1" >>$(proj_path)/make-synthesis.tcl
+	echo "reset_run synth_1" >>$(proj_path)/make-synthesis.tcl
+	echo "launch_runs -jobs $(MAX_THREADS) synth_1" >>$(proj_path)/make-synthesis.tcl
+	echo "wait_on_run synth_1" >>$(proj_path)/make-synthesis.tcl
+	$(vivado) -source $(proj_path)/make-synthesis.tcl
+	if find $(proj_path) -name "*.log" -exec cat {} \; | grep 'ERROR: ' ; then exit 1 ; fi
+	echo "set_param general.maxThreads $(MAX_THREADS)" >>$(proj_path)/make-bitstream.tcl
+	echo "open_project $(proj_file)" >$(proj_path)/make-bitstream.tcl
+	echo "reset_run impl_1" >>$(proj_path)/make-bitstream.tcl
+	echo "launch_runs -to_step write_bitstream -jobs $(MAX_THREADS) impl_1" >>$(proj_path)/make-bitstream.tcl
+	echo "wait_on_run impl_1" >>$(proj_path)/make-bitstream.tcl
+	$(vivado) -source $(proj_path)/make-bitstream.tcl
+	if find $(proj_path) -name "*.log" -exec cat {} \; | grep 'ERROR: ' ; then exit 1 ; fi
+	date >$@
 
 # --- program flash memory ---
 
